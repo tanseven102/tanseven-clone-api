@@ -69,6 +69,99 @@ def get_model():
         _model = m
     return _model
 
+# ============ CHUAN HOA VAN BAN (so + viet tat + phat am) ============
+_ONES = ["không","một","hai","ba","bốn","năm","sáu","bảy","tám","chín"]
+_PRON = {"Seven":"Sê Vờn","MiniMax":"Mi Ni Mách","YouTube":"Diu Túp","Youtube":"Diu Túp",
+         "Facebook":"Phây Búc","Zalo":"Za Lô","TikTok":"Tích Tóc","Google":"Gu Gồ"}
+_LETTER = {'A':'a','Ă':'á','Â':'ớ','B':'bê','C':'xê','D':'đê','Đ':'đê','E':'e','Ê':'ê','F':'ép',
+           'G':'gờ','H':'hát','I':'i','J':'di','K':'ca','L':'lờ','M':'mờ','N':'nờ','O':'o','Ô':'ô',
+           'Ơ':'ơ','P':'pê','Q':'quy','R':'rờ','S':'ét','T':'tê','U':'u','Ư':'ư','V':'vê','W':'vê kép',
+           'X':'ích','Y':'i','Z':'dét'}
+_SYM = [('%',' phần trăm'),('$',' đô la'),('&',' và '),('@',' a còng '),('=',' bằng '),('°',' độ '),('+',' cộng ')]
+
+def _read3(n, leading):
+    tr, ch, dv = n//100, (n%100)//10, n%10
+    out = []
+    if tr > 0: out.append(_ONES[tr]+" trăm")
+    elif not leading and (ch>0 or dv>0): out.append("không trăm")
+    if ch > 1:
+        out.append(_ONES[ch]+" mươi")
+        if dv==1: out.append("mốt")
+        elif dv==5: out.append("lăm")
+        elif dv>0: out.append(_ONES[dv])
+    elif ch == 1:
+        out.append("mười")
+        if dv==5: out.append("lăm")
+        elif dv>0: out.append(_ONES[dv])
+    else:
+        if dv>0:
+            if tr>0 or not leading: out.append("lẻ")
+            out.append(_ONES[dv])
+    return " ".join(out)
+
+def _num_to_vi(num):
+    num = int(num)
+    if num == 0: return "không"
+    neg = num < 0; num = abs(num)
+    groups = []
+    while num > 0:
+        groups.append(num%1000); num//=1000
+    units = ["","nghìn","triệu","tỷ","nghìn tỷ","triệu tỷ"]
+    parts, n = [], len(groups)
+    for i in range(n-1, -1, -1):
+        if groups[i]==0 and i>0: continue
+        seg = _read3(groups[i], i==n-1)
+        if seg: parts.append(seg + ((" "+units[i]) if units[i] else ""))
+    r = re.sub(r"\s+"," "," ".join(parts)).strip()
+    return ("âm "+r) if neg else r
+
+def _num_repl_vi(m):
+    s = m.group(0)
+    if "," in s:
+        intp, dec = s.replace(".","").split(",",1)
+        return _num_to_vi(intp or "0")+" phẩy "+" ".join(_ONES[int(d)] for d in dec if d.isdigit())
+    return _num_to_vi(s.replace(".",""))
+
+def _acr_repl(m):
+    s = m.group(0)
+    if re.search(r"[AĂÂEÊIOÔƠUƯY]", s):   # co nguyen am -> viet hoa nhan manh, doc thuong
+        return s.lower()
+    return " ".join(_LETTER.get(c,c) for c in s)   # toan phu am -> viet tat, danh van
+
+def _apply_pron(text):
+    for w in sorted(_PRON.keys(), key=len, reverse=True):
+        text = re.sub(r"\b"+re.escape(w)+r"\b", _PRON[w], text, flags=re.IGNORECASE)
+    return text
+
+_NUM2W = {"en":"en","es":"es","e":"es","fr":"fr","f":"fr","it":"it","i":"it","pt":"pt","p":"pt",
+          "de":"de","ru":"ru","nl":"nl","pl":"pl","tr":"tr","cs":"cz","hu":"hu"}
+_DEC_COMMA = {"es","e","fr","f","it","i","pt","p","de","ru","nl","pl","tr","cs","hu"}
+
+def normalize_text(text, lang):
+    lang = (lang or "vi").lower()
+    if lang == "vi":
+        text = _apply_pron(text)
+        text = re.sub(r"(\d[\d.,]*)\s*[đ₫]", lambda m: m.group(1)+" đồng", text)
+        for a,b in _SYM: text = text.replace(a,b)
+        text = re.sub(r"\b[A-ZĐÂĂÊÔƠƯ]{2,}\b", _acr_repl, text)
+        text = re.sub(r"\d[\d.,]*\d|\d", _num_repl_vi, text)
+        return re.sub(r"\s+"," ",text).strip()
+    code = _NUM2W.get(lang)
+    if not code: return text
+    try:
+        from num2words import num2words
+    except Exception:
+        return text
+    def _repl(m):
+        s = m.group(0)
+        try:
+            s2 = s.replace(".","").replace(",",".") if lang in _DEC_COMMA else s.replace(",","")
+            num = float(s2) if "." in s2 else int(s2)
+            return num2words(num, lang=code)
+        except Exception:
+            return s
+    return re.sub(r"\d[\d.,]*\d|\d", _repl, text)
+
 def split_text(text, max_chars=220):
     text = re.sub(r"\s+", " ", (text or "").strip())
     if not text: return []
@@ -136,6 +229,7 @@ def handler(job):
         gpt_cond, spk = m.get_conditioning_latents(
             audio_path=ref_path, gpt_cond_len=30, gpt_cond_chunk_len=6, max_ref_length=60)
         wavs = []
+        text = normalize_text(text, lang)   # so->chu tieng Viet/nuoc ngoai, viet tat, phat am
         for ch in split_text(text):
             out = m.inference(
                 ch, lang, gpt_cond, spk,
