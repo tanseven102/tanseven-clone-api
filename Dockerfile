@@ -19,7 +19,7 @@ RUN pip install --no-cache-dir \
         "coqui-tts==0.27.5" \
         "transformers>=4.57,<5.0" \
         "huggingface-hub>=0.34,<1.0" \
-        librosa soundfile num2words runpod
+        librosa soundfile num2words runpod noisereduce
 
 # Tai model viXTTS (~1.9GB) luc build -> cold-start nhanh
 RUN python -c "from huggingface_hub import snapshot_download; snapshot_download('capleaf/viXTTS', local_dir='/models/viXTTS')"

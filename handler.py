@@ -162,6 +162,18 @@ def normalize_text(text, lang):
             return s
     return re.sub(r"\d[\d.,]*\d|\d", _repl, text)
 
+def _denoise_ref(ref_path):
+    """Loc tap am mau giong (noisereduce) -> clone ro va giong hon."""
+    try:
+        import noisereduce as nr, librosa
+        y, sr = librosa.load(ref_path, sr=None, mono=True)
+        yd = nr.reduce_noise(y=y, sr=sr, stationary=False, prop_decrease=0.85)
+        out = ref_path + ".dn.wav"
+        sf.write(out, yd, sr)
+        return out
+    except Exception:
+        return ref_path
+
 def split_text(text, max_chars=220):
     text = re.sub(r"\s+", " ", (text or "").strip())
     if not text: return []
@@ -226,6 +238,12 @@ def handler(job):
         m = get_model()
         preset = STYLE_PRESETS.get(style, STYLE_PRESETS[DEFAULT_STYLE])
         spd = float(speed) if speed else preset["speed"]
+        # do bieu cam 0..1 -> temperature 0.30..0.90 (ghi de preset neu co)
+        expr = inp.get("expressiveness")
+        temp = (0.30 + 0.60*max(0.0, min(1.0, float(expr)))) if (expr is not None and expr != "") else preset["temperature"]
+        # loc tap am mau giong (tuy chon) -> clone ro hon
+        if inp.get("denoise"):
+            ref_path = _denoise_ref(ref_path)
         gpt_cond, spk = m.get_conditioning_latents(
             audio_path=ref_path, gpt_cond_len=30, gpt_cond_chunk_len=6, max_ref_length=60)
         wavs = []
@@ -233,7 +251,7 @@ def handler(job):
         for ch in split_text(text):
             out = m.inference(
                 ch, lang, gpt_cond, spk,
-                temperature=preset["temperature"],
+                temperature=temp,
                 repetition_penalty=preset.get("repetition_penalty", 10.0),
                 length_penalty=1.0, top_k=30, top_p=0.85,
                 speed=spd, enable_text_splitting=False)
