@@ -174,7 +174,36 @@ def _denoise_ref(ref_path):
     except Exception:
         return ref_path
 
-def split_text(text, max_chars=220):
+def _is_glitch(wav, sr, text):
+    """Phat hien chunk loi: qua dai (ren) / qua ngan (mat tieng) / im lang dai o giua (stall)."""
+    try:
+        n = len(wav)
+        if n < int(sr * 0.15): return True
+        dur = n / float(sr)
+        nt = len(re.sub(r"\s", "", text or ""))
+        if nt < 2: return False
+        exp = nt / 13.0
+        if dur > exp * 2.3 + 0.8: return True
+        if dur < exp * 0.32: return True
+        aw = np.abs(wav[:int(n * 0.92)])
+        quiet = (aw < 0.02).astype(np.int8)
+        if quiet.any():
+            dd = np.diff(np.concatenate(([0], quiet, [0])))
+            st = np.where(dd == 1)[0]; en = np.where(dd == -1)[0]
+            if len(st) and int((en - st).max()) / float(sr) > 0.75:
+                return True
+        return False
+    except Exception:
+        return False
+
+def _clone_infer(m, ch, lang, gpt_cond, spk, kw):
+    try:
+        o = m.inference(ch, lang, gpt_cond, spk, **kw)
+        return np.asarray(o["wav"], dtype="float32")
+    except Exception:
+        return None
+
+def split_text(text, max_chars=180):
     text = re.sub(r"\s+", " ", (text or "").strip())
     if not text: return []
     parts = [p.strip() for p in re.split(r"(?<=[.!?…])\s+", text) if p.strip()]
@@ -248,14 +277,20 @@ def handler(job):
             audio_path=ref_path, gpt_cond_len=30, gpt_cond_chunk_len=6, max_ref_length=60)
         wavs = []
         text = normalize_text(text, lang)   # so->chu tieng Viet/nuoc ngoai, viet tat, phat am
+        _kw = dict(temperature=temp, repetition_penalty=preset.get("repetition_penalty", 10.0),
+                   length_penalty=1.0, top_k=30, top_p=0.85, speed=spd, enable_text_splitting=False)
+        _retried = 0
         for ch in split_text(text):
-            out = m.inference(
-                ch, lang, gpt_cond, spk,
-                temperature=temp,
-                repetition_penalty=preset.get("repetition_penalty", 10.0),
-                length_penalty=1.0, top_k=30, top_p=0.85,
-                speed=spd, enable_text_splitting=False)
-            wavs.append(np.asarray(out["wav"], dtype="float32"))
+            # AUTO-RETRY: tao lai chunk bi loi (ren/lang/mat tieng) -> giao ban SACH
+            w = _clone_infer(m, ch, lang, gpt_cond, spk, _kw)
+            _t = 0
+            while (w is None or _is_glitch(w, SR, ch)) and _t < 3:
+                _w2 = _clone_infer(m, ch, lang, gpt_cond, spk, _kw)
+                if _w2 is not None and len(_w2) > 0: w = _w2
+                _t += 1
+            if _t: _retried += 1
+            if w is None or len(w) < 1: w = np.zeros(int(SR * 0.1), dtype="float32")
+            wavs.append(w)
         audio = _concat(wavs)
         data, fmt = _encode(audio, want)
         return {
@@ -263,6 +298,7 @@ def handler(job):
             "format": fmt, "chars": len(text),
             "audio_seconds": round(len(audio) / SR, 2),
             "gen_seconds": round(time.time() - t0, 2),
+            "retried_chunks": _retried,
         }
     except Exception as e:
         import traceback
